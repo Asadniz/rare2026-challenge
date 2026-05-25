@@ -56,7 +56,11 @@ class TrainingConfig:
     use_class_weights: bool = True
     use_weighted_sampling: bool = True
 
-    # Augmentations ettings
+    #Dinov3 specific settings
+    backbone_lr_multiplier: float = 0.1   # LR for unfrozen backbone layers
+    dinov3_unfreeze_blocks: int = 2        # How many last blocks to unfreeze
+
+    # Augmentations settings
     aug_preset: str = "top1" # "top1", "top2", "top3", "top4"
 
     # Augmentation parameters
@@ -220,7 +224,7 @@ def get_arg_parser() -> argparse.ArgumentParser:
 
     # Model type
     parser.add_argument(
-        "--model_type", type=str, choices=["resnet50", "vit_small", "vit_large"], help="Model architecture type"
+    "--model_type", type=str, choices=["resnet50", "vit_small", "vit_large", "dinov3"], help="Model architecture type"
     )
     parser.add_argument(
         "--model_filename", type=str, help="Filename of the model checkpoint"
@@ -232,5 +236,8 @@ def get_arg_parser() -> argparse.ArgumentParser:
 
     # Augmentation presets
     parser.add_argument("--aug_preset", type=str, help="Preset to be used")
+
+    parser.add_argument("--backbone_lr_multiplier", type=float, help="LR multiplier for backbone layers")
+    parser.add_argument("--dinov3_unfreeze_blocks", type=int, help="Number of last DINOv3 blocks to unfreeze")
 
     return parser

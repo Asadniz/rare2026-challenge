@@ -71,6 +71,7 @@ def collect_files(data_dir: str) -> pd.DataFrame:
     
     df = pd.DataFrame(files_data)
     df = df.drop_duplicates(subset=['image_path'])  # Remove duplicates from case variations
+    df = df.reset_index(drop=True)
     return df
 
 
@@ -85,9 +86,11 @@ def create_5fold_cv_splits(df: pd.DataFrame) -> pd.DataFrame:
     df_splits['strat_key'] = df_splits['center'] + '_' + df_splits['class_name']
     
     skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+    # split_col_idx = df_splits.columns.get_loc('split')
     
     for fold, (_, test_idx) in enumerate(skf.split(df_splits, df_splits['strat_key'])):
-        df_splits.loc[test_idx, 'split'] = f'fold_{fold}'
+        df_splits.loc[list(test_idx), 'split'] = f'fold_{fold}'
     
     df_splits = df_splits.drop('strat_key', axis=1)
     return df_splits
@@ -122,7 +125,7 @@ def create_holdout_cv_splits(df: pd.DataFrame, test_size: float = 0.2) -> pd.Dat
     )
     
     df_splits['split'] = 'test'
-    df_splits.loc[train_cv_idx, 'split'] = 'cv'
+    df_splits.loc[list(train_cv_idx), 'split'] = 'cv'
     
     # Create 5-fold CV on the training data
     cv_data = df_splits[df_splits['split'] == 'cv'].copy()

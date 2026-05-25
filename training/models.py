@@ -7,6 +7,7 @@ from huggingface_hub import hf_hub_download
 import timm
 import logging
 from collections import OrderedDict
+from transformers import AutoModel
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,54 @@ def _process_state_dict(checkpoint):
             new_state_dict[k] = v
 
     return new_state_dict
+
+class DINOv3Classifier(nn.Module):
+    def __init__(self, num_classes=2, unfreeze_blocks=2, huggingface_cache_dir=None):
+        super().__init__()
+        
+        self.backbone = AutoModel.from_pretrained(
+            "facebook/dinov3-vith16plus-pretrain-lvd1689m",
+            cache_dir=huggingface_cache_dir
+        )
+        
+        # Freeze everything first
+        for param in self.backbone.parameters():
+            param.requires_grad = False
+        
+        # Unfreeze last N transformer blocks
+        for param in self.backbone.layer[-unfreeze_blocks:].parameters():
+            param.requires_grad = True
+        
+        # Unfreeze final norm
+        for param in self.backbone.norm.parameters():
+            param.requires_grad = True
+        
+        # Classification head on top of CLS token (hidden dim is 1280 for ViT-H)
+        hidden_dim = self.backbone.config.hidden_size  # 1280
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_dim, 512),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(512, num_classes)
+        )
+        
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in self.parameters())
+        logger.info(f"DINOv3: Trainable {trainable/1e6:.1f}M / {total/1e6:.1f}M params ({100*trainable/total:.1f}%)")
+    
+    def forward(self, x):
+        outputs = self.backbone(x)
+        cls_token = outputs.last_hidden_state[:, 0]  # CLS token
+        return self.classifier(cls_token)
+    
+    def get_parameter_groups(self, base_lr, backbone_lr_multiplier=0.1):
+        """Return parameter groups with differential learning rates."""
+        backbone_params = [p for p in self.backbone.parameters() if p.requires_grad]
+        head_params = list(self.classifier.parameters())
+        return [
+            {"params": backbone_params, "lr": base_lr * backbone_lr_multiplier},
+            {"params": head_params, "lr": base_lr},
+        ]
 
 class ResNet50GastroNet(nn.Module):
     """ResNet50 model with GastroNet (https://doi.org/10.1016/j.media.2024.103298) weights adaptation."""
@@ -230,13 +279,18 @@ def create_loss_function(config, class_weights=None):
 
 
 def create_model(config, phase="train"):
-    """Create model based on configuration."""
     num_classes = config.num_classes
 
     if config.model_type == "resnet50":
         if config.model_filename is not None:
             return ResNet50GastroNet(num_classes=num_classes, filename=config.model_filename, our_weights=config.our_weights)
-        else: 
+        else:
             return ResNet50GastroNet(num_classes=num_classes, our_weights=config.our_weights)
+    elif config.model_type == "dinov3":
+        return DINOv3Classifier(
+            num_classes=num_classes,
+            unfreeze_blocks=getattr(config, 'dinov3_unfreeze_blocks', 2),
+            huggingface_cache_dir=getattr(config, 'huggingface_cache_dir', None)
+        )
     else:
         raise ValueError(f"Unknown model type: {config.model_type}")

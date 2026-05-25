@@ -177,13 +177,21 @@ class Trainer:
         model = create_model(self.config, phase="train")
         model = model.to(self.device)
 
-        all_params = [
-            {
-                "params": model.parameters(),
-                "weight_decay": self.config.weight_decay,
-                "lr": self.config.learning_rate,
-            }
-        ]
+        if hasattr(model, 'get_parameter_groups'):
+            all_params = model.get_parameter_groups(
+            self.config.learning_rate,
+            getattr(self.config, 'backbone_lr_multiplier', 0.1)
+        )
+            for pg in all_params:
+                pg["weight_decay"] = self.config.weight_decay
+        else:
+            all_params = [
+                {
+                    "params": model.parameters(),
+                    "weight_decay": self.config.weight_decay,
+                    "lr": self.config.learning_rate,
+                }
+            ]
 
         # Calculate class weights for loss function (if enabled)
         class_weights = None
@@ -536,8 +544,21 @@ class Trainer:
         model = create_model(temp_config, phase="train")
         model = model.to(self.device)
 
-        all_params = [{"params": model.parameters(), 
-                           "weight_decay": temp_config.weight_decay, "lr": temp_config.learning_rate}]
+        if hasattr(model, 'get_parameter_groups'):
+            all_params = model.get_parameter_groups(
+                self.config.learning_rate,
+                getattr(self.config, 'backbone_lr_multiplier', 0.1)
+            )
+            for pg in all_params:
+                pg["weight_decay"] = self.config.weight_decay
+        else:
+            all_params = [
+                {
+                    "params": model.parameters(),
+                    "weight_decay": self.config.weight_decay,
+                    "lr": self.config.learning_rate,
+                }
+            ]
 
         # Optimizer with HP parameters
         optimizer = optim.AdamW(all_params)
