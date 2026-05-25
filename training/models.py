@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from huggingface_hub import hf_hub_download
 import timm
 import logging
+from peft import LoraConfig, get_peft_model
 from collections import OrderedDict
 from transformers import AutoModel
 
@@ -29,6 +30,103 @@ def _process_state_dict(checkpoint):
             new_state_dict[k] = v
 
     return new_state_dict
+
+class ViTLoRAClassifier(nn.Module):
+    def __init__(self, num_classes=2, model_name="vit_base_patch16_224", lora_rank=8):
+        super().__init__()
+        
+        backbone = timm.create_model(model_name, pretrained=True, num_classes=0)
+        
+        lora_config = LoraConfig(
+            r=lora_rank,
+            lora_alpha=16,
+            target_modules=["qkv"],
+            lora_dropout=0.1,
+        )
+        
+        self.backbone = get_peft_model(backbone, lora_config)
+        hidden_dim = backbone.num_features
+        
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_dim, 256),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(256, num_classes)
+        )
+        
+        self.backbone.print_trainable_parameters()
+    
+    def forward(self, x):
+        features = self.backbone(x)
+        return self.classifier(features)
+    
+    def get_parameter_groups(self, base_lr, backbone_lr_multiplier=0.1):
+        backbone_params = [p for p in self.backbone.parameters() if p.requires_grad]
+        head_params = list(self.classifier.parameters())
+        return [
+            {"params": backbone_params, "lr": base_lr * backbone_lr_multiplier},
+            {"params": head_params, "lr": base_lr},
+        ]
+
+
+class EfficientNetV2Classifier(nn.Module):
+    def __init__(self, num_classes=2, model_name="tf_efficientnetv2_s"):
+        super().__init__()
+        
+        self.backbone = timm.create_model(model_name, pretrained=True, num_classes=0)
+        hidden_dim = self.backbone.num_features
+        
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_dim, 256),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(256, num_classes)
+        )
+        
+        total = sum(p.numel() for p in self.parameters())
+        logger.info(f"EfficientNetV2: {total/1e6:.1f}M total params")
+    
+    def forward(self, x):
+        features = self.backbone(x)
+        return self.classifier(features)
+    
+    def get_parameter_groups(self, base_lr, backbone_lr_multiplier=0.1):
+        backbone_params = list(self.backbone.parameters())
+        head_params = list(self.classifier.parameters())
+        return [
+            {"params": backbone_params, "lr": base_lr * backbone_lr_multiplier},
+            {"params": head_params, "lr": base_lr},
+        ]
+
+
+class ConvNeXtClassifier(nn.Module):
+    def __init__(self, num_classes=2, model_name="convnext_tiny"):
+        super().__init__()
+        
+        self.backbone = timm.create_model(model_name, pretrained=True, num_classes=0)
+        hidden_dim = self.backbone.num_features
+        
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_dim, 256),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(256, num_classes)
+        )
+        
+        total = sum(p.numel() for p in self.parameters())
+        logger.info(f"ConvNeXt: {total/1e6:.1f}M total params")
+    
+    def forward(self, x):
+        features = self.backbone(x)
+        return self.classifier(features)
+    
+    def get_parameter_groups(self, base_lr, backbone_lr_multiplier=0.1):
+        backbone_params = list(self.backbone.parameters())
+        head_params = list(self.classifier.parameters())
+        return [
+            {"params": backbone_params, "lr": base_lr * backbone_lr_multiplier},
+            {"params": head_params, "lr": base_lr},
+        ]
 
 class DINOv3Classifier(nn.Module):
     def __init__(self, num_classes=2, unfreeze_blocks=2, huggingface_cache_dir=None):
@@ -286,11 +384,25 @@ def create_model(config, phase="train"):
             return ResNet50GastroNet(num_classes=num_classes, filename=config.model_filename, our_weights=config.our_weights)
         else:
             return ResNet50GastroNet(num_classes=num_classes, our_weights=config.our_weights)
+    
     elif config.model_type == "dinov3":
         return DINOv3Classifier(
             num_classes=num_classes,
             unfreeze_blocks=getattr(config, 'dinov3_unfreeze_blocks', 2),
             huggingface_cache_dir=getattr(config, 'huggingface_cache_dir', None)
         )
+    
+    elif config.model_type == "vit_lora":
+        return ViTLoRAClassifier(
+            num_classes=num_classes,
+            lora_rank=getattr(config, 'lora_rank', 8)
+        )
+    
+    elif config.model_type == "efficientnetv2":
+        return EfficientNetV2Classifier(num_classes=num_classes)
+    
+    elif config.model_type == "convnext":
+        return ConvNeXtClassifier(num_classes=num_classes)
+    
     else:
         raise ValueError(f"Unknown model type: {config.model_type}")

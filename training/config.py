@@ -16,6 +16,9 @@ LOSS_TYPES: Tuple[str, ...] = (
 class TrainingConfig:
     """Training configuration class."""
 
+    #Rank for lora
+    lora_rank: int = 8
+
     # Data settings
     data_dir: str = "data/train"
     splits_dir: str = "data/splits"
@@ -224,8 +227,10 @@ def get_arg_parser() -> argparse.ArgumentParser:
 
     # Model type
     parser.add_argument(
-    "--model_type", type=str, choices=["resnet50", "vit_small", "vit_large", "dinov3"], help="Model architecture type"
+    "--model_type", type=str, choices=["resnet50", "vit_small", "vit_large", "dinov3", "vit_lora", "efficientnetv2", "convnext"], help="Model architecture type"
     )
+    parser.add_argument("--lora_rank", type=int, help="LoRA rank for vit_lora model")
+    
     parser.add_argument(
         "--model_filename", type=str, help="Filename of the model checkpoint"
     )
