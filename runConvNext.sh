@@ -1,0 +1,12 @@
+echo "=== Training ConvNeXt ==="
+python -m training.train \
+  --model_type convnext \
+  --batch_size 32 \
+  --epochs 30 \
+  --learning_rate 1e-4 \
+  --loss_type cross_entropy \
+  --cv_type 5fold_cv \
+  --single_fold \
+  --fold_number 0 \
+  --data_dir data/train \
+  --aug_preset top4
