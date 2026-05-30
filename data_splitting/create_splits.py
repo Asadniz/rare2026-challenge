@@ -13,6 +13,13 @@ import json
 from typing import List, Dict, Tuple
 import argparse
 
+os.environ['DATA_DIR'] = '/kaggle/input/rare2026-data/train'
+os.environ['SPLITS_DIR'] = '/kaggle/working/rare2026-challenge/data/splits'
+os.environ['RESULTS_DIR'] = '/kaggle/working/rare2026-challenge/results'
+
+data_dir = os.environ.get('DATA_DIR', 'data/train')
+results_dir = os.environ.get('RESULTS_DIR', 'results')
+splits_dir = os.environ.get('SPLITS_DIR', 'data/splits')
 
 def collect_files(data_dir: str) -> pd.DataFrame:
     """
@@ -255,9 +262,9 @@ def sanity_check_splits(
 
 def main():
     parser = argparse.ArgumentParser(description='Create data splits for DL classification')
-    parser.add_argument('--data_dir', type=str, default='data/train',
+    parser.add_argument('--data_dir', type=str, default=data_dir,
                        help='Path to the data directory')
-    parser.add_argument('--output_dir', type=str, default='data/splits',
+    parser.add_argument('--output_dir', type=str, default=splits_dir,
                        help='Directory to save split files')
     args = parser.parse_args()
     
