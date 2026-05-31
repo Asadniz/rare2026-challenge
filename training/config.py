@@ -117,6 +117,10 @@ class TrainingConfig:
     optuna_storage: str = None
     hp_search_loss: bool = False  # include loss function search in hyperparameter optimization
 
+    @property
+    def output_dir(self):
+        return self.results_dir
+
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "TrainingConfig":
         """
