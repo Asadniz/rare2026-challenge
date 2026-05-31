@@ -5,9 +5,9 @@ from dataclasses import dataclass
 import os
 from typing import Optional, Dict, Any, Tuple, List
 
-data_dir: str = os.environ.get('DATA_DIR', 'data/train')
-results_dir: str = os.environ.get('RESULTS_DIR', 'results')
-splits_dir: str = os.environ.get('SPLITS_DIR', 'data/splits')
+data_dir = os.environ.get('DATA_DIR', 'data/train')
+results_dir = os.environ.get('RESULTS_DIR', 'results')
+splits_dir = os.environ.get('SPLITS_DIR', 'data/splits')
 
 LOSS_TYPES: Tuple[str, ...] = (
     "cross_entropy",
