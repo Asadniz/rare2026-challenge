@@ -113,7 +113,7 @@ class Trainer:
             test_paths, 
             test_labels, 
             transform=get_transforms("val", self.config), 
-            data_root=None, 
+            data_root=self.config.data_dir, 
             im_size=self.config.im_size,
             phase="test")
 
