@@ -746,7 +746,7 @@ class Trainer:
 
         # Create validation loader
         val_dataset = CachedGastroDataset(val_paths, val_labels, transform=get_transforms("val", self.config), 
-                                          data_root=None, 
+                                          data_root=self.config.data_dir, 
                                           im_size=self.config.im_size, phase="val")
         val_loader = torch.utils.data.DataLoader(
             val_dataset, batch_size=temp_config.batch_size, shuffle=False, num_workers=self.config.num_workers, pin_memory=True
