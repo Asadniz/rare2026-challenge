@@ -154,7 +154,7 @@ def get_arg_parser() -> argparse.ArgumentParser:
     # Data settings
     parser.add_argument("--data_dir", type=str, help="Path to data directory")
     parser.add_argument("--splits_dir", type=str, help="Path to splits directory")
-    parser.add_argument("--output_dir", type=str, help="Output directory for results")
+    parser.add_argument("--results_dir", "--output_dir", type=str, help="Output directory for results")
     parser.add_argument("--huggingface_cache_dir", type=str, help="Cache dir for huggingface")
 
     # Wandb info
