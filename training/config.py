@@ -40,7 +40,7 @@ class TrainingConfig:
     our_weights: bool = False
 
     # Image settings
-    im_size: str = "surrogate" # "regular" or "large"
+    im_size: str = "regular" # "regular" or "large"
 
     # Training hyperparameters
     batch_size: int = 32
@@ -49,7 +49,7 @@ class TrainingConfig:
     weight_decay: float = 1e-4
 
     # Loss selection (single source of truth)
-    loss_type: str = "cross_entropy"  # one of LOSS_TYPES
+    loss_type: str = "surrogate"  # one of LOSS_TYPES
 
     # Loss-specific parameters
     # ppv (CE + ranking for PPV@Recall)
