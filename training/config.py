@@ -40,7 +40,7 @@ class TrainingConfig:
     our_weights: bool = False
 
     # Image settings
-    im_size: str = "regular" # "regular" or "large"
+    im_size: str = "surrogate" # "regular" or "large"
 
     # Training hyperparameters
     batch_size: int = 32

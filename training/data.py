@@ -113,6 +113,7 @@ def get_transforms(phase='train', config=None):
         transforms_list.extend([
             # A.Resize(height=256, width=256),
             A.RandomResizedCrop(size=(im_size, im_size), scale=(0.8, 1.0), ratio=(0.75, 1.33), p=1.0),
+            A.CLAHE(clip_limit=2.0, tile_grid_size=(8, 8), p=0.5),
             A.HorizontalFlip(p=0.5),
             A.VerticalFlip(p=0.5),
             A.Rotate(limit=15, p=0.8),
@@ -195,6 +196,7 @@ def get_transforms(phase='train', config=None):
     else:  # Validation
         return A.Compose([
             A.Resize(height=im_size, width=im_size),
+            A.CLAHE(clip_limit=2.0, tile_grid_size=(8, 8), p=1.0),
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2(),
         ])
