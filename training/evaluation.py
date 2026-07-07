@@ -13,12 +13,26 @@ from validation.metrics import (
     compute_youden_threshold_gpu,
     compute_extended_metrics,
 )
-from .calibration import fit_calibrated_positive_scores
 from .utils import log_print
 
 logger = logging.getLogger("training.evaluation")
 
 CHALLENGE_PREVALENCE = 1 / 101
+ORIGINAL_THRESHOLD = 0.5
+
+# Score-based metrics (identical in both columns) and class-based metrics (differ by threshold).
+SCORE_METRIC_ROWS = (
+    ("auroc", "AUROC"),
+    ("auprc", "AUPRC"),
+)
+CLASS_METRIC_ROWS = (
+    ("accuracy", "Accuracy"),
+    ("sensitivity", "Sensitivity"),
+    ("specificity", "Specificity"),
+    ("f1", "F1"),
+    ("balanced_accuracy", "Balanced accuracy"),
+)
+CHALLENGE_PPV_LABEL = f"Challenge PPV@90% recall (prev={CHALLENGE_PREVALENCE:.4f})"
 
 
 class Evaluator:
@@ -49,7 +63,7 @@ class Evaluator:
         metrics = compute_extended_metrics(scores, analysis["labels"], threshold)
         return scores, analysis["labels"], metrics
 
-    def _run_inference(self, model, loader, criterion, split_name="val"):
+    def _run_inference(self, model, loader, criterion, split_name="val", verbose=False):
         """Run forward pass over a loader and collect predictions."""
         model.eval()
         running_loss = 0.0
@@ -62,13 +76,14 @@ class Evaluator:
         logits_list = []
         all_paths = []
 
-        log_print(f"{split_name}: inference starting ({num_batches} batches)")
+        if verbose:
+            log_print(f"{split_name}: inference starting ({num_batches} batches)")
 
         with torch.no_grad():
             for batch_idx, (images, labels, paths) in enumerate(loader):
-                if batch_idx == 0:
+                if verbose and batch_idx == 0:
                     log_print(f"{split_name}: first batch loaded — images={tuple(images.shape)}")
-                elif num_batches > 10 and batch_idx % max(1, num_batches // 5) == 0:
+                elif verbose and num_batches > 10 and batch_idx % max(1, num_batches // 5) == 0:
                     log_print(f"{split_name}: batch {batch_idx + 1}/{num_batches}")
 
                 images, labels = images.to(self.device, non_blocking=True), labels.to(self.device, non_blocking=True)
@@ -98,7 +113,8 @@ class Evaluator:
         epoch_acc = 100.0 * correct / max(total, 1)
         probs = self.logits_to_probs(all_logits.cpu().numpy())
 
-        log_print(f"{split_name}: inference done — loss={epoch_loss:.4f}, acc={epoch_acc:.2f}%")
+        if verbose:
+            log_print(f"{split_name}: inference done — loss={epoch_loss:.4f}, acc={epoch_acc:.2f}%")
 
         return {
             "loss": epoch_loss,
@@ -112,7 +128,13 @@ class Evaluator:
 
     def analyze_predictions(self, logits, labels, prevalence=CHALLENGE_PREVALENCE):
         """
-        Compute challenge PPV plus full metric suites for raw (Youden) and calibrated scores.
+        Compute metrics for two decision rules on the same raw scores:
+
+        - original: fixed 0.5 probability threshold (previous pipeline default)
+        - youden:   data-driven Youden J threshold on this split
+
+        Score-based metrics (AUROC, AUPRC, Challenge PPV) use the same
+        continuous scores for both columns; only class-based metrics differ.
         """
         labels_arr = np.asarray(labels).flatten()
         probs = self.logits_to_probs(logits)
@@ -123,6 +145,12 @@ class Evaluator:
         probs_t = torch.tensor(probs, device=self.device, dtype=torch.float32)
         labels_t = torch.tensor(labels_arr, device=self.device, dtype=torch.float32)
 
+        original_threshold = ORIGINAL_THRESHOLD
+        youden_threshold = compute_youden_threshold_gpu(probs_t, labels_t)
+
+        original_metrics = compute_extended_metrics(probs, labels_arr, original_threshold)
+        youden_metrics = compute_extended_metrics(probs, labels_arr, youden_threshold)
+
         try:
             challenge_ppv = prevalence_corrected_ppv_at_90_recall_gpu(
                 probs_t, labels_t, prevalence=prevalence,
@@ -131,43 +159,20 @@ class Evaluator:
             logger.warning(f"Challenge PPV calculation failed: {e}")
             challenge_ppv = 0.0
 
-        youden_threshold = compute_youden_threshold_gpu(probs_t, labels_t)
-        youden_metrics = compute_extended_metrics(probs, labels_arr, youden_threshold)
-
-        calibrated_probs = None
-        cal_t = float("nan")
-        cal_b = float("nan")
-        calibrated_youden_threshold = float("nan")
-        calibrated_metrics = {k: 0.0 for k in youden_metrics}
-
-        try:
-            calibrated_probs, cal_t, cal_b = fit_calibrated_positive_scores(logits, labels_arr)
-            cal_probs_t = torch.tensor(calibrated_probs, device=self.device, dtype=torch.float32)
-            calibrated_youden_threshold = compute_youden_threshold_gpu(cal_probs_t, labels_t)
-            calibrated_metrics = compute_extended_metrics(
-                calibrated_probs, labels_arr, calibrated_youden_threshold,
-            )
-        except Exception as e:
-            logger.warning(f"Calibration failed: {e}")
-            calibrated_probs = np.full_like(probs, np.nan)
-
         return {
-            "challenge_ppv": challenge_ppv,
+            "original_threshold": original_threshold,
             "youden_threshold": youden_threshold,
+            "original_metrics": original_metrics,
             "youden_metrics": youden_metrics,
-            "calibrated_probs": calibrated_probs,
-            "cal_t": cal_t,
-            "cal_b": cal_b,
-            "calibrated_youden_threshold": calibrated_youden_threshold,
-            "calibrated_metrics": calibrated_metrics,
+            "challenge_ppv": challenge_ppv,
             "probs": probs,
             "labels": labels_arr,
             "logits": np.asarray(logits),
         }
 
-    def validate_and_analyze(self, model, loader, criterion, split_name="val", prevalence=CHALLENGE_PREVALENCE):
-        """Run inference and compute raw-Youden + calibrated metric suites."""
-        inference = self._run_inference(model, loader, criterion, split_name=split_name)
+    def validate_and_analyze(self, model, loader, criterion, split_name="val", prevalence=CHALLENGE_PREVALENCE, verbose=False):
+        """Run inference and compute original vs Youden metric suites."""
+        inference = self._run_inference(model, loader, criterion, split_name=split_name, verbose=verbose)
         analysis = self.analyze_predictions(inference["logits"], inference["labels"], prevalence=prevalence)
         analysis.update(inference)
         return analysis
@@ -186,35 +191,47 @@ class Evaluator:
             analysis["probs"],
         )
 
+    @staticmethod
+    def _format_metric_value(value):
+        if value is None or (isinstance(value, float) and np.isnan(value)):
+            return "   —   "
+        return f"{value:.4f}"
+
     def log_epoch_analysis(self, analysis, split_name, epoch=None, fold=None, wandb_log_fn=None):
-        """Print and optionally log all per-epoch metrics (raw Youden + calibrated)."""
+        """Print a compact side-by-side table: original (0.5) | youden."""
         parts = []
         if fold is not None:
             parts.append(f"Fold {fold}")
         if epoch is not None:
             parts.append(f"Epoch {epoch}")
-        parts.append(split_name)
-        header = ", ".join(parts) + " metrics"
+        parts.append(split_name.upper())
+        header = " — ".join(parts)
 
-        log_print("=" * 60)
+        col_w = 44
+        log_print("=" * 72)
         log_print(header)
-        log_print(f"  loss={analysis['loss']:.4f}, argmax_accuracy={analysis['accuracy']:.2f}%")
-        log_print(
-            f"  challenge_ppv@90_recall (prevalence-corrected, prev={CHALLENGE_PREVALENCE:.6f})="
-            f"{analysis['challenge_ppv']:.4f}"
-        )
+        log_print(f"{'':<{col_w}} original (t=0.5) | youden (t={analysis['youden_threshold']:.4f})")
+        log_print("-" * 72)
+        log_print(f"{'loss':<{col_w}} {analysis['loss']:.4f}")
+        log_print(f"{'argmax accuracy':<{col_w}} {analysis['accuracy']:.2f}%")
 
-        log_print(f"  --- raw scores / Youden threshold={analysis['youden_threshold']:.4f} ---")
-        for key, value in sorted(analysis["youden_metrics"].items()):
-            log_print(f"    youden/{key}: {value:.4f}")
+        for key, label in SCORE_METRIC_ROWS:
+            value = analysis["original_metrics"].get(key, float("nan"))
+            formatted = self._format_metric_value(value)
+            log_print(f"{label:<{col_w}} {formatted} | {formatted}")
 
-        log_print(
-            f"  --- calibrated scores (t={analysis['cal_t']:.4f}, b={analysis['cal_b']:.4f}) / "
-            f"Youden threshold={analysis['calibrated_youden_threshold']:.4f} ---"
-        )
-        for key, value in sorted(analysis["calibrated_metrics"].items()):
-            log_print(f"    calibrated/{key}: {value:.4f}")
-        log_print("=" * 60)
+        ppv = analysis["challenge_ppv"]
+        ppv_fmt = self._format_metric_value(ppv)
+        log_print(f"{CHALLENGE_PPV_LABEL:<{col_w}} {ppv_fmt} | {ppv_fmt}")
+
+        for key, label in CLASS_METRIC_ROWS:
+            orig = analysis["original_metrics"].get(key, float("nan"))
+            youd = analysis["youden_metrics"].get(key, float("nan"))
+            log_print(
+                f"{label:<{col_w}} {self._format_metric_value(orig)} | {self._format_metric_value(youd)}"
+            )
+
+        log_print("=" * 72)
 
         if wandb_log_fn is None:
             return
@@ -223,15 +240,12 @@ class Evaluator:
             f"{split_name}/loss": analysis["loss"],
             f"{split_name}/accuracy": analysis["accuracy"],
             f"{split_name}/challenge_ppv": analysis["challenge_ppv"],
+            f"{split_name}/original/threshold": analysis["original_threshold"],
             f"{split_name}/youden/threshold": analysis["youden_threshold"],
-            f"{split_name}/calibrated/threshold": analysis["calibrated_youden_threshold"],
-            f"{split_name}/calibrated/t": analysis["cal_t"],
-            f"{split_name}/calibrated/b": analysis["cal_b"],
         }
-        for key, value in analysis["youden_metrics"].items():
-            payload[f"{split_name}/youden/{key}"] = value
-        for key, value in analysis["calibrated_metrics"].items():
-            payload[f"{split_name}/calibrated/{key}"] = value
+        for key, _ in (*SCORE_METRIC_ROWS, *CLASS_METRIC_ROWS):
+            payload[f"{split_name}/original/{key}"] = analysis["original_metrics"].get(key, 0.0)
+            payload[f"{split_name}/youden/{key}"] = analysis["youden_metrics"].get(key, 0.0)
         if epoch is not None:
             payload["epoch"] = epoch
         wandb_log_fn(payload)

@@ -21,10 +21,8 @@ class _FlushStreamHandler(logging.StreamHandler):
 
 
 def log_print(msg, level=logging.INFO, logger_instance=None):
-    """Print immediately to stdout and also emit via logging."""
+    """Print immediately to stdout (single line, no duplicate logger output)."""
     print(f"[training] {msg}", flush=True)
-    target = logger_instance or logger
-    target.log(level, msg)
 
 
 def set_random_seeds(seed=42):

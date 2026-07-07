@@ -128,16 +128,36 @@ class Trainer:
 
         return epoch_loss, epoch_acc
 
-    def _finalize_fold_evaluation(self, model, train_loader, val_loader, criterion, fold):
-        """Compute full Youden + calibrated metrics on validation and train splits."""
+    def _evaluate_epoch_splits(self, model, train_loader, val_loader, criterion, epoch, fold, wandb_log_fn=None):
+        """Run original vs Youden metrics on train and val after each epoch."""
+        log_print(f"Fold {fold}, Epoch {epoch}: evaluating val...")
         val_analysis = self.evaluator.validate_and_analyze(
             model, val_loader, criterion, split_name="val",
         )
-        self.evaluator.log_epoch_analysis(val_analysis, "val", fold=fold, wandb_log_fn=self._wandb_log)
+        self.evaluator.log_epoch_analysis(
+            val_analysis, "val", epoch=epoch, fold=fold, wandb_log_fn=wandb_log_fn,
+        )
 
-        log_print(f"Fold {fold}: running final train-set evaluation...")
+        log_print(f"Fold {fold}, Epoch {epoch}: evaluating train...")
         train_analysis = self.evaluator.validate_and_analyze(
             model, train_loader, criterion, split_name="train",
+        )
+        self.evaluator.log_epoch_analysis(
+            train_analysis, "train", epoch=epoch, fold=fold, wandb_log_fn=wandb_log_fn,
+        )
+
+        return train_analysis, val_analysis
+
+    def _finalize_fold_evaluation(self, model, train_loader, val_loader, criterion, fold):
+        """Final evaluation on best checkpoint (train + val, verbose inference)."""
+        log_print(f"Fold {fold}: final evaluation on best checkpoint...")
+        val_analysis = self.evaluator.validate_and_analyze(
+            model, val_loader, criterion, split_name="val", verbose=True,
+        )
+        self.evaluator.log_epoch_analysis(val_analysis, "val", fold=fold, wandb_log_fn=self._wandb_log)
+
+        train_analysis = self.evaluator.validate_and_analyze(
+            model, train_loader, criterion, split_name="train", verbose=True,
         )
         self.evaluator.log_epoch_analysis(train_analysis, "train", fold=fold, wandb_log_fn=self._wandb_log)
 
@@ -303,12 +323,9 @@ class Trainer:
                 model, train_loader, criterion, optimizer, scheduler, epoch,
             )
 
-            log_print(f"Fold {fold}, Epoch {epoch}: running validation...")
-            val_analysis = self.evaluator.validate_and_analyze(
-                model, val_loader, criterion, split_name="val",
-            )
-            self.evaluator.log_epoch_analysis(
-                val_analysis, "val", epoch=epoch, fold=fold, wandb_log_fn=self._wandb_log,
+            _, val_analysis = self._evaluate_epoch_splits(
+                model, train_loader, val_loader, criterion, epoch, fold,
+                wandb_log_fn=self._wandb_log,
             )
 
             val_ppv = val_analysis["challenge_ppv"]
@@ -318,7 +335,7 @@ class Trainer:
             val_logits = val_analysis["logits"]
             val_paths = val_analysis["paths"]
 
-            # Save best model (selected by challenge prevalence-corrected PPV@90% recall)
+            # Save best model (selected by prevalence-corrected PPV@90% recall on val)
             if val_ppv > best_ppv:
                 best_ppv = val_ppv
                 self._save_checkpoint(
@@ -340,7 +357,7 @@ class Trainer:
                     "best/val_loss": val_loss,
                     "best/val_accuracy": val_acc,
                 })
-                log_print(f"Fold {fold}: new best model saved (PPV={best_ppv:.4f})")
+                log_print(f"Fold {fold}: new best model saved (Challenge PPV={best_ppv:.4f})")
 
         log_print(f"Fold {fold}: training loop complete, loading best checkpoint for final evaluation...")
         checkpoint = torch.load(best_model_path, weights_only=False, map_location="cpu")
@@ -651,22 +668,16 @@ class Trainer:
                 model, train_loader, criterion, optimizer, scheduler, epoch,
             )
 
-            # Validation with full Youden + calibrated metrics
-            val_analysis = self.evaluator.validate_and_analyze(
-                model, val_loader, criterion, split_name="val",
+            # Validation with original vs Youden metrics (train + val tables logged)
+            _, val_analysis = self._evaluate_epoch_splits(
+                model, train_loader, val_loader, criterion, epoch, fold,
+                wandb_log_fn=self._wandb_log if (epoch % 5 == 0) else None,
             )
             val_ppv = val_analysis["challenge_ppv"]
             val_loss = val_analysis["loss"]
             val_acc = val_analysis["accuracy"]
 
-            if epoch % 10 == 0:
-                self.evaluator.log_epoch_analysis(val_analysis, "val", epoch=epoch)
-
-            # Log metrics to wandb
             if (wandb.run is not None) and (epoch % 5 == 0):
-                self.evaluator.log_epoch_analysis(
-                    val_analysis, "val", epoch=epoch, wandb_log_fn=self._wandb_log,
-                )
                 wandb.log({
                     "train/loss": train_loss,
                     "train/accuracy": train_acc,

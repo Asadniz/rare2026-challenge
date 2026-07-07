@@ -86,7 +86,7 @@ def test_probability_metrics_ignore_threshold():
     metrics_a = compute_extended_metrics(scores, y_true, threshold_a)
     metrics_b = compute_extended_metrics(scores, y_true, threshold_b)
 
-    for key in ("auroc", "auprc", "ppv_at_90_recall"):
+    for key in ("auroc", "auprc"):
         assert metrics_a[key] == metrics_b[key], f"{key} should not depend on threshold"
     assert metrics_a["f1"] != metrics_b["f1"] or threshold_a == threshold_b
     print("[ok] Probability metrics are threshold-independent")
@@ -182,12 +182,29 @@ def test_evaluator_evaluate_split_with_mock_model():
     print("[ok] Evaluator.evaluate_split runs end-to-end")
 
 
+def test_evaluator_analyze_predictions_original_vs_youden():
+    device = torch.device("cpu")
+    evaluator = Evaluator(device)
+    y_true, scores = make_scores_and_labels()
+    logits = np.stack([1.0 - scores, scores], axis=1).astype(np.float32)
+
+    analysis = evaluator.analyze_predictions(logits, y_true)
+    assert "original_metrics" in analysis and "youden_metrics" in analysis
+    assert "challenge_ppv" in analysis
+    assert analysis["original_threshold"] == 0.5
+    assert 0.0 <= analysis["youden_threshold"] <= 1.0
+
+    for key in ("auroc", "auprc"):
+        assert analysis["original_metrics"][key] == analysis["youden_metrics"][key]
+    print("[ok] analyze_predictions returns original vs youden metric suites")
+
+
 def test_training_finalize_signature_static():
     source = (ROOT / "training" / "training.py").read_text()
+    assert "def _evaluate_epoch_splits(self, model, train_loader, val_loader, criterion, epoch, fold):" in source
     assert "def _finalize_fold_evaluation(self, model, train_loader, val_loader, criterion, fold):" in source
-    assert "youden_threshold = compute_youden_threshold_gpu" in source
     assert "return val_preds, val_labels_true, val_logits, val_paths, val_ppv, youden_threshold" in source
-    print("[ok] Trainer finalize/eval wiring present in training.py")
+    print("[ok] Trainer epoch eval + finalize wiring present in training.py")
 
 
 def main():
@@ -199,6 +216,7 @@ def main():
         test_evaluator_validate_epoch_unpacking,
         test_evaluator_split_metrics_and_predictions_df,
         test_evaluator_evaluate_split_with_mock_model,
+        test_evaluator_analyze_predictions_original_vs_youden,
         test_training_finalize_signature_static,
     ]
 

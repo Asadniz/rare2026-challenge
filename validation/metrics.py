@@ -6,7 +6,6 @@ from sklearn.metrics import (
     average_precision_score,
     balanced_accuracy_score,
     f1_score,
-    precision_recall_curve,
     roc_auc_score,
 )
 
@@ -212,9 +211,12 @@ def compute_extended_metrics(
     """
     Compute probability-based and class-based metrics for a split.
 
-    Probability-based metrics (AUPRC, AUROC, PPV@90% Recall) are computed on
-    continuous scores without binarization. Class-based metrics are computed on
-    hard predictions obtained by thresholding scores at ``threshold``.
+    Probability-based metrics (AUPRC, AUROC) are computed on continuous scores
+    without binarization. Class-based metrics are computed on hard predictions
+    obtained by thresholding scores at ``threshold``.
+
+    Challenge PPV@90% recall is computed separately via
+    ``prevalence_corrected_ppv_at_90_recall_gpu`` (see training/evaluation.py).
     """
     if torch.is_tensor(scores):
         scores = scores.detach().cpu().numpy()
@@ -229,12 +231,9 @@ def compute_extended_metrics(
     if len(np.unique(y_true)) > 1:
         metrics["auroc"] = float(roc_auc_score(y_true=y_true, y_score=scores))
         metrics["auprc"] = float(average_precision_score(y_true=y_true, y_score=scores))
-        precisions, recalls, _ = precision_recall_curve(y_true=y_true, y_score=scores)
-        metrics["ppv_at_90_recall"] = float(np.interp(0.9, recalls[::-1], precisions[::-1]))
     else:
         metrics["auroc"] = 0.0
         metrics["auprc"] = 0.0
-        metrics["ppv_at_90_recall"] = 0.0
 
     y_pred = (scores >= threshold).astype(int)
     tp = int(np.sum((y_pred == 1) & (y_true == 1)))
