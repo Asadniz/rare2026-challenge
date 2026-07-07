@@ -8,3 +8,9 @@ wandb/
 .lr_find*
 *.db
 dino_repo
+
+# Local dev / smoke test artifacts
+.smoke-venv/
+.cache/
+.pytest_cache/
+*.egg-info/
