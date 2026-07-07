@@ -23,7 +23,6 @@ from .models import create_model, create_loss_function
 from .data import create_data_loaders, CachedGastroDataset, get_transforms
 from .evaluation import Evaluator
 from .utils import log_print
-from validation.metrics import compute_youden_threshold_gpu
 
 logger = logging.getLogger("training.training")
 
@@ -130,38 +129,25 @@ class Trainer:
         return epoch_loss, epoch_acc
 
     def _finalize_fold_evaluation(self, model, train_loader, val_loader, criterion, fold):
-        """Compute Youden threshold on validation and extended metrics for train/val."""
-        val_loss, val_acc, val_ppv, _, val_labels_true, val_logits, val_paths, val_probs = self.evaluator.validate_epoch(
-            model, val_loader, criterion,
+        """Compute full Youden + calibrated metrics on validation and train splits."""
+        val_analysis = self.evaluator.validate_and_analyze(
+            model, val_loader, criterion, split_name="val",
         )
+        self.evaluator.log_epoch_analysis(val_analysis, "val", fold=fold, wandb_log_fn=self._wandb_log)
 
-        val_probs_tensor = torch.tensor(val_probs, device=self.device)
-        val_labels_tensor = torch.tensor(val_labels_true, device=self.device)
-        youden_threshold = compute_youden_threshold_gpu(val_probs_tensor, val_labels_tensor)
-
-        val_metrics = self.evaluator.compute_split_metrics(val_logits, val_labels_true, youden_threshold)
-        _, train_labels, train_metrics = self.evaluator.evaluate_split(
-            model, train_loader, criterion, youden_threshold
+        log_print(f"Fold {fold}: running final train-set evaluation...")
+        train_analysis = self.evaluator.validate_and_analyze(
+            model, train_loader, criterion, split_name="train",
         )
+        self.evaluator.log_epoch_analysis(train_analysis, "train", fold=fold, wandb_log_fn=self._wandb_log)
 
+        youden_threshold = val_analysis["youden_threshold"]
+        val_probs = val_analysis["probs"]
+        val_labels_true = val_analysis["labels"]
+        val_logits = val_analysis["logits"]
+        val_paths = val_analysis["paths"]
+        val_ppv = val_analysis["challenge_ppv"]
         val_preds = (val_probs >= youden_threshold).astype(int)
-
-        if wandb.run is not None:
-            wandb.log({
-                "val/youden_threshold": youden_threshold,
-                "final/accuracy": val_acc,
-                "final/ppv": val_ppv,
-                "final/loss": val_loss,
-            })
-            self.evaluator.log_extended_metrics(train_metrics, "train")
-            self.evaluator.log_extended_metrics(val_metrics, "val")
-
-        logger.info(
-            f"Fold {fold} Final Results: Acc: {val_acc:.2f}%, PPV: {val_ppv:.4f}, "
-            f"Youden threshold: {youden_threshold:.4f}"
-        )
-        logger.info(f"Fold {fold} Train metrics: {train_metrics}")
-        logger.info(f"Fold {fold} Val metrics: {val_metrics}")
 
         self.evaluator.print_classification_report(
             val_labels_true, val_preds, fold, threshold=youden_threshold
@@ -318,24 +304,21 @@ class Trainer:
             )
 
             log_print(f"Fold {fold}, Epoch {epoch}: running validation...")
-            val_loss, val_acc, val_ppv, _, val_labels_true, val_logits, val_paths, _ = self.evaluator.validate_epoch(
-                model, val_loader, criterion,
+            val_analysis = self.evaluator.validate_and_analyze(
+                model, val_loader, criterion, split_name="val",
+            )
+            self.evaluator.log_epoch_analysis(
+                val_analysis, "val", epoch=epoch, fold=fold, wandb_log_fn=self._wandb_log,
             )
 
-            self._wandb_log({
-                "val/loss": val_loss,
-                "val/accuracy": val_acc,
-                "val/ppv": val_ppv,
-                "epoch": epoch
-            })
+            val_ppv = val_analysis["challenge_ppv"]
+            val_loss = val_analysis["loss"]
+            val_acc = val_analysis["accuracy"]
+            val_labels_true = val_analysis["labels"]
+            val_logits = val_analysis["logits"]
+            val_paths = val_analysis["paths"]
 
-            log_print(
-                f"Fold {fold}, Epoch {epoch}: "
-                f"Train Loss={train_loss:.4f}, Train Acc={train_acc:.2f}%, "
-                f"Val Loss={val_loss:.4f}, Val Acc={val_acc:.2f}%, Val PPV={val_ppv:.4f}"
-            )
-
-            # Save best model
+            # Save best model (selected by challenge prevalence-corrected PPV@90% recall)
             if val_ppv > best_ppv:
                 best_ppv = val_ppv
                 self._save_checkpoint(
@@ -352,10 +335,10 @@ class Trainer:
                     best_model_path,
                 )
                 self._wandb_log({
-                    "best/ppv": best_ppv,
+                    "best/challenge_ppv": best_ppv,
                     "best/epoch": epoch,
                     "best/val_loss": val_loss,
-                    "best/val_accuracy": val_acc
+                    "best/val_accuracy": val_acc,
                 })
                 log_print(f"Fold {fold}: new best model saved (PPV={best_ppv:.4f})")
 
@@ -668,21 +651,26 @@ class Trainer:
                 model, train_loader, criterion, optimizer, scheduler, epoch,
             )
 
-            # Validation
-            val_loss, val_acc, val_ppv, _, _, _, _, _ = self.evaluator.validate_epoch(
-                model, val_loader, criterion
+            # Validation with full Youden + calibrated metrics
+            val_analysis = self.evaluator.validate_and_analyze(
+                model, val_loader, criterion, split_name="val",
             )
+            val_ppv = val_analysis["challenge_ppv"]
+            val_loss = val_analysis["loss"]
+            val_acc = val_analysis["accuracy"]
+
+            if epoch % 10 == 0:
+                self.evaluator.log_epoch_analysis(val_analysis, "val", epoch=epoch)
 
             # Log metrics to wandb
             if (wandb.run is not None) and (epoch % 5 == 0):
+                self.evaluator.log_epoch_analysis(
+                    val_analysis, "val", epoch=epoch, wandb_log_fn=self._wandb_log,
+                )
                 wandb.log({
                     "train/loss": train_loss,
                     "train/accuracy": train_acc,
-                    "val/loss": val_loss,
-                    "val/accuracy": val_acc,
-                    "val/ppv": val_ppv,
-                    "epoch": epoch,
-                    "learning_rate": optimizer.param_groups[0]['lr']
+                    "learning_rate": optimizer.param_groups[0]['lr'],
                 })
 
             # Update best score
@@ -694,7 +682,7 @@ class Trainer:
                 # Log best metrics to wandb
                 if wandb.run is not None:
                     wandb.log({
-                        "best/ppv": best_val_ppv,
+                        "best/challenge_ppv": best_val_ppv,
                         "best/epoch": epoch
                     })
             else:
