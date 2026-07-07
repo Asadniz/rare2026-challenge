@@ -1,8 +1,23 @@
 import numpy as np
-from sklearn.metrics import roc_auc_score, average_precision_score, precision_recall_curve
+from sklearn.metrics import (
+    average_precision_score,
+    balanced_accuracy_score,
+    f1_score,
+    precision_recall_curve,
+    roc_auc_score,
+    roc_curve,
+)
 
 
-def compute_challenge_metrics(y_true, y_scores):
+def compute_youden_threshold(y_true, y_scores):
+    """Select the threshold that maximizes Youden's J statistic."""
+    fpr, tpr, thresholds = roc_curve(y_true, y_scores)
+    youden_index = tpr - fpr
+    best_idx = np.argmax(youden_index)
+    return float(thresholds[best_idx])
+
+
+def compute_challenge_metrics(y_true, y_scores, threshold=0.5):
     """
     Computes the same metrics as the challenge: AUROC, AUPRC, PPV@90% Recall, Accuracy, Sensitivity, and Specificity.
 
@@ -23,8 +38,8 @@ def compute_challenge_metrics(y_true, y_scores):
     # Find PPV @ 90% Recall
     ppv_90 = np.interp(0.9, recalls[::-1], precisions[::-1])
 
-    # Convert scores to binary predictions (threshold at 0.5)
-    y_pred = (y_scores >= 0.5).astype(int)
+    # Convert scores to binary predictions at the provided threshold
+    y_pred = (y_scores >= threshold).astype(int)
 
     # Compute Accuracy, Sensitivity, and Specificity
     tp = np.sum((y_pred == 1) & (y_true == 1))
@@ -43,6 +58,8 @@ def compute_challenge_metrics(y_true, y_scores):
         "Accuracy": accuracy,
         "Sensitivity": sensitivity,
         "Specificity": specificity,
+        "F1": float(f1_score(y_true, y_pred, zero_division=0)),
+        "Balanced Accuracy": float(balanced_accuracy_score(y_true, y_pred)),
     }
 
 
