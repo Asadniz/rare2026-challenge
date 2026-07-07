@@ -22,8 +22,10 @@ from torch.utils.data import DataLoader
 from .models import create_model, create_loss_function
 from .data import create_data_loaders, CachedGastroDataset, get_transforms
 from .evaluation import Evaluator
+from .utils import log_print
+from validation.metrics import compute_youden_threshold_gpu
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("training.training")
 
 
 class Trainer:
@@ -33,6 +35,33 @@ class Trainer:
         self.config = config
         self.device = device
         self.evaluator = Evaluator(device)
+
+    def _wandb_enabled(self):
+        return not getattr(self.config, "disable_wandb", False)
+
+    def _init_wandb(self, name, config_dict, tags):
+        if not self._wandb_enabled():
+            log_print("W&B disabled — skipping wandb.init()")
+            return
+        log_print(f"Initializing W&B run: {name} (project={getattr(self.config, 'wandb_project', 'gastro-training')})")
+        wandb.init(
+            project=getattr(self.config, "wandb_project", "gastro-training"),
+            group=getattr(self.config, "wandb_group", "baseline"),
+            name=name,
+            config=config_dict,
+            tags=tags,
+            settings=wandb.Settings(console="off"),
+        )
+        log_print(f"W&B run initialized: {wandb.run.url if wandb.run else 'n/a'}")
+
+    def _finish_wandb(self):
+        if wandb.run is not None:
+            log_print("Finishing W&B run")
+            wandb.finish()
+
+    def _wandb_log(self, metrics):
+        if wandb.run is not None:
+            wandb.log(metrics)
 
     def train_epoch(
         self,
@@ -48,9 +77,17 @@ class Trainer:
         running_loss = 0.0
         correct = 0
         total = 0
+        num_batches = len(train_loader)
 
+        log_print(f"Epoch {epoch}: starting training ({num_batches} batches)")
 
         for batch_idx, (images, labels, _) in enumerate(train_loader):
+            if batch_idx == 0:
+                log_print(
+                    f"Epoch {epoch}: first batch loaded — "
+                    f"images={tuple(images.shape)}, labels={len(labels)}"
+                )
+
             images, labels = images.to(self.device, non_blocking=True), labels.to(self.device, non_blocking=True)
 
             optimizer.zero_grad()
@@ -61,38 +98,78 @@ class Trainer:
             loss.backward()
             optimizer.step()
 
-            running_loss += loss
+            running_loss += loss.item()
 
             _, predicted = torch.max(outputs.data, 1)
             total += labels.size(0)
-            correct += (predicted == labels).sum()
+            correct += (predicted == labels).sum().item()
 
             # Logging
-            log_every = 50
-            if batch_idx % log_every == 0:
-                logger.info(
-                    f"Epoch {epoch}, Batch {batch_idx}/{len(train_loader)}, "
-                    f"Loss: {loss:.4f}, Acc: {100.0 * correct / max(total,1):.2f}%"
+            log_every = 10
+            if batch_idx % log_every == 0 or batch_idx == num_batches - 1:
+                msg = (
+                    f"Epoch {epoch}, Batch {batch_idx + 1}/{num_batches}, "
+                    f"Loss: {loss.item():.4f}, Acc: {100.0 * correct / max(total, 1):.2f}%"
                 )
+                log_print(msg)
 
         if scheduler:
             scheduler.step()
 
-        epoch_loss = running_loss / len(train_loader)
+        epoch_loss = running_loss / num_batches
         epoch_acc = 100.0 * correct / max(total, 1)
+        log_print(f"Epoch {epoch}: train done — loss={epoch_loss:.4f}, acc={epoch_acc:.2f}%")
 
-        # Log epoch metrics to wandb
-        if wandb.run is not None:
-            wandb.log({
-                "train/loss": epoch_loss,
-                "train/accuracy": epoch_acc,
-                "train/learning_rate": optimizer.param_groups[0]['lr'],
-                "epoch": epoch
-            })
+        self._wandb_log({
+            "train/loss": epoch_loss,
+            "train/accuracy": epoch_acc,
+            "train/learning_rate": optimizer.param_groups[0]['lr'],
+            "epoch": epoch
+        })
 
         return epoch_loss, epoch_acc
 
-    def predict_on_test_set(self, fold, test_paths, test_labels, checkpoint_dir):
+    def _finalize_fold_evaluation(self, model, train_loader, val_loader, criterion, fold):
+        """Compute Youden threshold on validation and extended metrics for train/val."""
+        val_loss, val_acc, val_ppv, _, val_labels_true, val_logits, val_paths, val_probs = self.evaluator.validate_epoch(
+            model, val_loader, criterion,
+        )
+
+        val_probs_tensor = torch.tensor(val_probs, device=self.device)
+        val_labels_tensor = torch.tensor(val_labels_true, device=self.device)
+        youden_threshold = compute_youden_threshold_gpu(val_probs_tensor, val_labels_tensor)
+
+        val_metrics = self.evaluator.compute_split_metrics(val_logits, val_labels_true, youden_threshold)
+        _, train_labels, train_metrics = self.evaluator.evaluate_split(
+            model, train_loader, criterion, youden_threshold
+        )
+
+        val_preds = (val_probs >= youden_threshold).astype(int)
+
+        if wandb.run is not None:
+            wandb.log({
+                "val/youden_threshold": youden_threshold,
+                "final/accuracy": val_acc,
+                "final/ppv": val_ppv,
+                "final/loss": val_loss,
+            })
+            self.evaluator.log_extended_metrics(train_metrics, "train")
+            self.evaluator.log_extended_metrics(val_metrics, "val")
+
+        logger.info(
+            f"Fold {fold} Final Results: Acc: {val_acc:.2f}%, PPV: {val_ppv:.4f}, "
+            f"Youden threshold: {youden_threshold:.4f}"
+        )
+        logger.info(f"Fold {fold} Train metrics: {train_metrics}")
+        logger.info(f"Fold {fold} Val metrics: {val_metrics}")
+
+        self.evaluator.print_classification_report(
+            val_labels_true, val_preds, fold, threshold=youden_threshold
+        )
+
+        return val_preds, val_labels_true, val_logits, val_paths, val_ppv, youden_threshold
+
+    def predict_on_test_set(self, fold, test_paths, test_labels, checkpoint_dir, youden_threshold=None):
         """Load best model for fold and predict on test set."""
         logger.info(f"Predicting on test set for fold {fold}")
 
@@ -125,20 +202,22 @@ class Trainer:
         criterion = create_loss_function(self.config).to(self.device)
 
         # Get predictions
-        _, _, _, test_preds, test_labels_true, test_logits, test_paths_list = self.evaluator.validate_epoch(
+        _, _, _, test_preds, test_labels_true, test_logits, test_paths_list, test_probs = self.evaluator.validate_epoch(
             model, test_loader, criterion
         )
 
-        return test_preds, test_labels_true, test_logits, test_paths_list
+        if youden_threshold is not None:
+            test_preds = (test_probs >= youden_threshold).astype(int)
+
+        return test_preds, test_labels_true, test_logits, test_paths_list, test_probs
 
 
     def train_fold(self, fold, train_paths, train_labels, val_paths, val_labels, data_root, checkpoint_dir):
         """Train a single fold."""
-        logger.info(f"\n{'='*50}")
-        logger.info(f"Training Fold {fold}")
-        logger.info(f"{'='*50}")
+        log_print("=" * 50)
+        log_print(f"Training Fold {fold}")
+        log_print("=" * 50)
 
-        # Initialize wandb for this fold
         wandb_config = {
             "fold": fold,
             "loss_type": self.config.loss_type,
@@ -150,32 +229,39 @@ class Trainer:
             "num_val_samples": len(val_paths),
         }
 
-        wandb.init(
-            project=getattr(self.config, "wandb_project", "gastro-training"),
-            group=getattr(self.config, "wandb_group", "baseline"),
+        self._init_wandb(
             name=f"fold_{fold}",
-            config=wandb_config,
+            config_dict=wandb_config,
             tags=[f"fold_{fold}", self.config.loss_type],
-            reinit=True
         )
 
-        logger.info(f"FOLD {fold} - TRAINING WITH CONFIG:")
-        logger.info(f"  Loss type: {self.config.loss_type}")
-        logger.info(f"  Learning Rate: {self.config.learning_rate}")
-        logger.info(f"  Weight Decay: {self.config.weight_decay}")
-        logger.info(f"  Batch Size: {self.config.batch_size}")
+        log_print(f"FOLD {fold} - TRAINING WITH CONFIG:")
+        log_print(f"  Model: {self.config.model_type}")
+        log_print(f"  Loss type: {self.config.loss_type}")
+        log_print(f"  Learning Rate: {self.config.learning_rate}")
+        log_print(f"  Weight Decay: {self.config.weight_decay}")
+        log_print(f"  Batch Size: {self.config.batch_size}")
+        log_print(f"  Epochs: {self.config.epochs}")
+        log_print(f"  Train samples: {len(train_paths)}, Val samples: {len(val_paths)}")
 
         # Sanity check for no leakage
         self._check_data_leakage(train_paths, val_paths, fold)
 
-        # Create data loaders
+        # Create data loaders (loads and caches all images — can take several minutes)
+        log_print(f"Fold {fold}: creating data loaders and caching images (this may take a while)...")
         train_loader, val_loader = create_data_loaders(
             train_paths, train_labels, val_paths, val_labels, self.config, data_root
         )
+        log_print(
+            f"Fold {fold}: data loaders ready — "
+            f"train_batches={len(train_loader)}, val_batches={len(val_loader)}"
+        )
 
         # Initialize model
+        log_print(f"Fold {fold}: loading model ({self.config.model_type})...")
         model = create_model(self.config, phase="train")
         model = model.to(self.device)
+        log_print(f"Fold {fold}: model loaded and moved to {self.device}")
 
         if hasattr(model, 'get_parameter_groups'):
             all_params = model.get_parameter_groups(
@@ -200,17 +286,15 @@ class Trainer:
             # Avoid division by zero
             class_counts = np.clip(class_counts, 1, None)
             class_weights = torch.FloatTensor([1.0 / class_counts[0], 1.0 / class_counts[1]]).to(self.device)
-            logger.info(f"Using class weights in loss: {class_weights}")
-            wandb.log({"class_weights": class_weights.tolist()})
+            log_print(f"Using class weights in loss: {class_weights}")
+            self._wandb_log({"class_weights": class_weights.tolist()})
         else:
-            logger.info("Class weights in loss disabled")
+            log_print("Class weights in loss disabled")
 
         # Create loss function
         criterion = create_loss_function(self.config, class_weights).to(self.device)
 
-        logger.info(f"FOLD {fold} - CREATING OPTIMIZER WITH:")
-        logger.info(f"  Learning Rate: {self.config.learning_rate}")
-        logger.info(f"  Weight Decay: {self.config.weight_decay}")
+        log_print(f"FOLD {fold} - creating optimizer (lr={self.config.learning_rate}, wd={self.config.weight_decay})")
 
         # Optimizer and scheduler
         optimizer = optim.AdamW(all_params)
@@ -224,29 +308,31 @@ class Trainer:
         # Training loop
         best_ppv = 0.0
         best_model_path = os.path.join(checkpoint_dir, f"best_model_fold_{fold}.pth")
+        log_print(f"Fold {fold}: starting training loop ({self.config.epochs} epochs)")
 
         for epoch in range(self.config.epochs):
-            
+            log_print(f"Fold {fold}: --- epoch {epoch + 1}/{self.config.epochs} ---")
+
             train_loss, train_acc = self.train_epoch(
                 model, train_loader, criterion, optimizer, scheduler, epoch,
             )
 
-            val_loss, val_acc, val_ppv, val_preds, val_labels_true, val_logits, val_paths = self.evaluator.validate_epoch(
-                model, val_loader, criterion, 
+            log_print(f"Fold {fold}, Epoch {epoch}: running validation...")
+            val_loss, val_acc, val_ppv, _, val_labels_true, val_logits, val_paths, _ = self.evaluator.validate_epoch(
+                model, val_loader, criterion,
             )
 
-            # Log validation metrics to wandb
-            wandb.log({
+            self._wandb_log({
                 "val/loss": val_loss,
                 "val/accuracy": val_acc,
                 "val/ppv": val_ppv,
                 "epoch": epoch
             })
 
-            logger.info(
+            log_print(
                 f"Fold {fold}, Epoch {epoch}: "
-                f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%, "
-                f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%, Val PPV: {val_ppv:.4f}"
+                f"Train Loss={train_loss:.4f}, Train Acc={train_acc:.2f}%, "
+                f"Val Loss={val_loss:.4f}, Val Acc={val_acc:.2f}%, Val PPV={val_ppv:.4f}"
             )
 
             # Save best model
@@ -265,49 +351,36 @@ class Trainer:
                     train_acc,
                     best_model_path,
                 )
-                # Log best metrics to wandb
-                wandb.log({
+                self._wandb_log({
                     "best/ppv": best_ppv,
                     "best/epoch": epoch,
                     "best/val_loss": val_loss,
                     "best/val_accuracy": val_acc
                 })
-                logger.info(f"New best model saved with PPV: {best_ppv:.4f}")
+                log_print(f"Fold {fold}: new best model saved (PPV={best_ppv:.4f})")
 
-        # Load best model and get final predictions
+        log_print(f"Fold {fold}: training loop complete, loading best checkpoint for final evaluation...")
         checkpoint = torch.load(best_model_path, weights_only=False, map_location="cpu")
         self._load_checkpoint(model, checkpoint)
 
-        val_loss, val_acc, val_ppv, val_preds, val_labels_true, val_logits, val_paths = self.evaluator.validate_epoch(
-            model, val_loader, criterion,
+        val_preds, val_labels_true, val_logits, val_paths, val_ppv, youden_threshold = self._finalize_fold_evaluation(
+            model, train_loader, val_loader, criterion, fold
         )
-
-        # Log final results
-        wandb.log({
-            "final/accuracy": val_acc,
-            "final/ppv": val_ppv,
-            "final/loss": val_loss
-        })
-
-        logger.info(f"Fold {fold} Final Results: Acc: {val_acc:.2f}%, PPV: {val_ppv:.4f}")
-
-        # Print classification report
-        self.evaluator.print_classification_report(val_labels_true, val_preds, fold)
 
         # Save checkpoint to final location
         final_checkpoint_path = os.path.join(checkpoint_dir, f"fold_{fold}_best_checkpoint.pth")
         if os.path.exists(best_model_path):
             os.rename(best_model_path, final_checkpoint_path)
-            logger.info(f"Checkpoint saved to: {final_checkpoint_path}")
+            log_print(f"Checkpoint saved to: {final_checkpoint_path}")
 
         # Save fold paths
         torch.save(val_paths, os.path.join(checkpoint_dir, f"fold_{fold}_val_paths.pt"))
         torch.save(train_paths, os.path.join(checkpoint_dir, f"fold_{fold}_train_paths.pt"))
 
-        # Finish wandb run for this fold
-        wandb.finish()
+        self._finish_wandb()
+        log_print(f"Fold {fold}: complete (best PPV={best_ppv:.4f}, Youden threshold={youden_threshold:.4f})")
 
-        return val_preds, val_labels_true, val_logits, val_paths, val_ppv
+        return val_preds, val_labels_true, val_logits, val_paths, val_ppv, youden_threshold
 
     def hyperparameter_search(self, fold, train_paths, train_labels, val_paths, val_labels, checkpoint_dir):
         """Perform Optuna hyperparameter search for a single fold with W&B logging."""
@@ -596,7 +669,7 @@ class Trainer:
             )
 
             # Validation
-            val_loss, val_acc, val_ppv, _, _, _, _ = self.evaluator.validate_epoch(
+            val_loss, val_acc, val_ppv, _, _, _, _, _ = self.evaluator.validate_epoch(
                 model, val_loader, criterion
             )
 
@@ -722,7 +795,16 @@ class Trainer:
     def _load_checkpoint(self, model, checkpoint):
         model.load_state_dict(checkpoint["model_state_dict"])
 
-    def load_and_evaluate_best_model(self, fold, val_paths, val_labels, checkpoint_path, final_checkpoint_dir):
+    def load_and_evaluate_best_model(
+        self,
+        fold,
+        train_paths,
+        train_labels,
+        val_paths,
+        val_labels,
+        checkpoint_path,
+        final_checkpoint_dir,
+    ):
         """Load the best model from Optuna and evaluate it."""
         logger.info(f"Loading best Optuna model for fold {fold}: {checkpoint_path}")
 
@@ -744,25 +826,19 @@ class Trainer:
 
         self._load_checkpoint(model, checkpoint)
 
-        # Create validation loader
-        val_dataset = CachedGastroDataset(val_paths, val_labels, transform=get_transforms("val", self.config), 
-                                          data_root=self.config.data_dir, 
-                                          im_size=self.config.im_size, phase="val")
-        val_loader = torch.utils.data.DataLoader(
-            val_dataset, batch_size=temp_config.batch_size, shuffle=False, num_workers=self.config.num_workers, pin_memory=True
+        # Create train and validation loaders
+        train_loader, val_loader = create_data_loaders(
+            train_paths, train_labels, val_paths, val_labels, temp_config, self.config.data_dir
         )
 
         # Evaluate
         criterion = create_loss_function(temp_config).to(self.device)  # Dummy criterion for evaluation
-        val_loss, val_acc, val_ppv, val_preds, val_labels_true, val_logits, val_paths_list = self.evaluator.validate_epoch(
-            model, val_loader, criterion,
+        val_preds, val_labels_true, val_logits, val_paths_list, val_ppv, youden_threshold = (
+            self._finalize_fold_evaluation(model, train_loader, val_loader, criterion, fold)
         )
-
-        logger.info(f"Fold {fold} Best Optuna Results: Acc: {val_acc:.2f}%, PPV: {val_ppv:.4f}")
-        self.evaluator.print_classification_report(val_labels_true, val_preds, fold)
 
         # Copy checkpoint to final location
         final_checkpoint_path = os.path.join(final_checkpoint_dir, f"fold_{fold}_best_checkpoint.pth")
         torch.save(checkpoint, final_checkpoint_path)
 
-        return val_preds, val_labels_true, val_logits, val_paths_list, val_ppv
+        return val_preds, val_labels_true, val_logits, val_paths_list, val_ppv, youden_threshold

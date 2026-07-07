@@ -9,8 +9,9 @@ import logging
 from peft import LoraConfig, get_peft_model
 from collections import OrderedDict
 from transformers import AutoModel
+from .utils import log_print
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("training.models")
 
 def _process_state_dict(checkpoint):
     """Normalize checkpoint format so it can always be loaded into timm ResNet."""
@@ -131,11 +132,13 @@ class ConvNeXtClassifier(nn.Module):
 class DINOv3Classifier(nn.Module):
     def __init__(self, num_classes=2, unfreeze_blocks=2, huggingface_cache_dir=None):
         super().__init__()
-        
+
+        log_print("DINOv3: downloading/loading facebook/dinov3-vith16plus-pretrain-lvd1689m (may take a few minutes)...")
         self.backbone = AutoModel.from_pretrained(
             "facebook/dinov3-vith16plus-pretrain-lvd1689m",
             cache_dir=huggingface_cache_dir
         )
+        log_print("DINOv3: backbone loaded from HuggingFace")
         
         # Freeze everything first
         for param in self.backbone.parameters():
@@ -160,6 +163,8 @@ class DINOv3Classifier(nn.Module):
         
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         total = sum(p.numel() for p in self.parameters())
+        log_print(f"DINOv3: trainable {trainable/1e6:.1f}M / {total/1e6:.1f}M params ({100*trainable/total:.1f}%), "
+                  f"unfreeze_blocks={unfreeze_blocks}")
         logger.info(f"DINOv3: Trainable {trainable/1e6:.1f}M / {total/1e6:.1f}M params ({100*trainable/total:.1f}%)")
     
     def forward(self, x):

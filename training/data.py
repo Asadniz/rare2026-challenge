@@ -11,8 +11,9 @@ import logging
 import cv2
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
+from .utils import log_print
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("training.data")
 
 cv2.setNumThreads(1)
 
@@ -35,11 +36,15 @@ class CachedGastroDataset(Dataset):
             pre_h = pre_w = None
 
         self.cached_images = []
-        
 
         data_root = Path(data_root) if data_root else None
+        total = len(file_paths)
+        log_print(
+            f"CachedGastroDataset [{phase}]: caching {total} images "
+            f"(resize={'256x256' if phase == 'train' else 'full resolution'})..."
+        )
 
-        for fp in file_paths:
+        for idx, fp in enumerate(file_paths):
             image_path = data_root / fp if (data_root and not os.path.isabs(fp)) else fp
             with Image.open(image_path) as img:
                 image = img.convert('RGB').copy()
@@ -50,8 +55,13 @@ class CachedGastroDataset(Dataset):
 
             self.cached_images.append(image)
 
+            if total <= 20 or (idx + 1) % max(1, total // 10) == 0 or idx == 0 or idx == total - 1:
+                log_print(f"CachedGastroDataset [{phase}]: loaded {idx + 1}/{total} images")
+
         if len(self.cached_images) == 0:
             raise RuntimeError("No images were loaded successfully. Check your dataset paths and formats.")
+
+        log_print(f"CachedGastroDataset [{phase}]: done — {len(self.cached_images)} images in RAM")
 
 
     def __getitem__(self, idx):
@@ -220,13 +230,15 @@ def create_weighted_sampler(labels):
 def create_data_loaders(train_paths, train_labels, val_paths, val_labels, config, data_root=None):
     """Create training and validation data loaders with augmentation support."""
 
-    logger.info(f"Creating data loaders with batch_size: {config.batch_size}")
+    log_print(f"create_data_loaders: batch_size={config.batch_size}, num_workers={config.num_workers}, "
+              f"prefetch_factor={config.prefetch_factor}")
     
     # Get transforms
     train_transform = get_transforms('train', config)
     val_transform = get_transforms('val', config)
     
     # Create datasets
+    log_print("create_data_loaders: building train dataset...")
     train_dataset = CachedGastroDataset(
         train_paths, train_labels, 
         transform=train_transform, 
@@ -234,6 +246,7 @@ def create_data_loaders(train_paths, train_labels, val_paths, val_labels, config
         im_size=config.im_size,
         phase="train"
     )
+    log_print("create_data_loaders: building val dataset...")
     val_dataset = CachedGastroDataset(
         val_paths, val_labels, 
         transform=val_transform, 
@@ -270,6 +283,7 @@ def create_data_loaders(train_paths, train_labels, val_paths, val_labels, config
         prefetch_factor=config.prefetch_factor,
     )
 
-    logger.info(f"Num workers used: {config.num_workers}")
+    log_print(f"create_data_loaders: ready — train={len(train_dataset)}, val={len(val_dataset)}, "
+              f"weighted_sampling={config.use_weighted_sampling}")
     
     return train_loader, val_loader

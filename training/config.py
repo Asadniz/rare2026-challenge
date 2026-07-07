@@ -32,6 +32,7 @@ class TrainingConfig:
     # wandb
     wandb_project: str = "rare_resnet"
     wandb_group: str = "gastronet"
+    disable_wandb: bool = False
 
     # Model settings
     num_classes: int = 2
@@ -142,6 +143,9 @@ class TrainingConfig:
         if self.loss_type not in LOSS_TYPES:
             raise ValueError(f"loss_type must be one of {LOSS_TYPES}, got '{self.loss_type}'.")
 
+        if os.environ.get("WANDB_MODE", "").lower() == "disabled":
+            self.disable_wandb = True
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert config to dictionary."""
         return self.__dict__.copy()
@@ -160,6 +164,12 @@ def get_arg_parser() -> argparse.ArgumentParser:
     # Wandb info
     parser.add_argument("--wandb_project", type=str, help="Name of wandb project")
     parser.add_argument("--wandb_group", type=str, help="Name of wandb group")
+    parser.add_argument(
+        "--disable_wandb",
+        action="store_true",
+        default=None,
+        help="Disable Weights & Biases logging (also respects WANDB_MODE=disabled)",
+    )
     
     # Training hyperparameters
     parser.add_argument("--batch_size", type=int, help="Batch size for training")

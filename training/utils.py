@@ -5,10 +5,26 @@ import json
 import random
 import datetime
 import logging
+import sys
 import numpy as np
 import torch
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("training")
+
+
+class _FlushStreamHandler(logging.StreamHandler):
+    """Stream handler that flushes after every log record (needed for Kaggle/bash)."""
+
+    def emit(self, record):
+        super().emit(record)
+        self.flush()
+
+
+def log_print(msg, level=logging.INFO, logger_instance=None):
+    """Print immediately to stdout and also emit via logging."""
+    print(f"[training] {msg}", flush=True)
+    target = logger_instance or logger
+    target.log(level, msg)
 
 
 def set_random_seeds(seed=42):
@@ -23,7 +39,7 @@ def set_random_seeds(seed=42):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     
-    logger.info(f"Random seeds set to {seed} for reproducibility")
+    log_print(f"Random seeds set to {seed} for reproducibility")
 
 
 def create_checkpoint_dir(config):
@@ -69,9 +85,33 @@ def create_checkpoint_dir(config):
 
 
 def setup_logging(level=logging.INFO):
-    """Setup logging configuration."""
-    logging.basicConfig(
-        level=level, 
-        format='%(asctime)s - %(levelname)s - %(message)s'
+    """Setup logging configuration with unbuffered stdout for bash/Kaggle."""
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(line_buffering=True)
+
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(level)
+
+    handler = _FlushStreamHandler(sys.stdout)
+    handler.setLevel(level)
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     )
-    return logging.getLogger(__name__)
+    root.addHandler(handler)
+
+    for name in (
+        "training",
+        "training.train",
+        "training.training",
+        "training.data",
+        "training.models",
+        "training.evaluation",
+        "training.utils",
+    ):
+        logging.getLogger(name).setLevel(level)
+
+    log_print("Logging configured (stdout, line-buffered, flush-on-write)")
+    return logging.getLogger("training.train")
